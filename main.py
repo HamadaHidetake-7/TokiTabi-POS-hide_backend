@@ -1,7 +1,16 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, Column, Integer, String, Float
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+
+# MySQL データベースに接続する設定
+DATABASE_URL = "mysql+pymysql://root:%40S15MakeMeGreat@localhost/pos_app"
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
 app = FastAPI()
 
@@ -14,87 +23,111 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Product Model class
-class Product(BaseModel):
-    id: Optional[int] = None
+# Product モデル
+class Product(Base):
+    __tablename__ = "products"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False)
+
+# Order モデル
+class Order(Base):
+    __tablename__ = "orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, nullable=False)
+    quantity = Column(Integer, nullable=False)
+
+# データベースのテーブルを作成
+Base.metadata.create_all(bind=engine)
+
+# Pydantic モデル
+class ProductCreate(BaseModel):
     name: str
     price: float
     quantity: int
 
-# Order Model class
-class Order(BaseModel):
+class ProductResponse(ProductCreate):
+    id: int
+
+    class Config:
+        orm_mode = True
+
+class OrderCreate(BaseModel):
     product_id: int
     quantity: int
 
-# In-memory database to store products
-products = [
-    Product(id=1, name="Apple", price=150, quantity=20),
-    Product(id=2, name="Banana", price=50, quantity=100),
-]
+class OrderResponse(OrderCreate):
+    id: int
 
-# In-memory database to store orders
-orders = []
+    class Config:
+        orm_mode = True
 
-# Endpoint to get all products
-@app.get("/products/", response_model=List[Product])
-def get_products():
-    return products
+# データベースセッションを取得する依存関数
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-# Endpoint to get a product by ID
-@app.get("/products/{product_id}", response_model=Product)
-def get_product(product_id: int):
-    for product in products:
-        if product.id == product_id:
-            return product
-    raise HTTPException(status_code=404, detail="Product not found")
+# エンドポイントの設定
+@app.get("/products/", response_model=List[ProductResponse])
+def get_products(db: Session = Depends(get_db)):
+    return db.query(Product).all()
 
-# Endpoint to add a new product
-@app.post("/products/", response_model=Product)
-def add_product(product: Product):
-    # Assigning a new ID by incrementing the max current ID
-    product.id = max([p.id for p in products]) + 1 if products else 1
-    products.append(product)
+@app.get("/products/{product_id}", response_model=ProductResponse)
+def get_product(product_id: int, db: Session = Depends(get_db)):
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
     return product
 
-# Endpoint to update a product by ID
-@app.put("/products/{product_id}", response_model=Product)
-def update_product(product_id: int, updated_product: Product):
-    for idx, product in enumerate(products):
-        if product.id == product_id:
-            updated_product.id = product_id
-            products[idx] = updated_product
-            return updated_product
-    raise HTTPException(status_code=404, detail="Product not found")
+@app.post("/products/", response_model=ProductResponse)
+def create_product(product: ProductCreate, db: Session = Depends(get_db)):
+    db_product = Product(name=product.name, price=product.price, quantity=product.quantity)
+    db.add(db_product)
+    db.commit()
+    db.refresh(db_product)
+    return db_product
 
-# Endpoint to delete a product by ID
+@app.put("/products/{product_id}", response_model=ProductResponse)
+def update_product(product_id: int, updated_product: ProductCreate, db: Session = Depends(get_db)):
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    product.name = updated_product.name
+    product.price = updated_product.price
+    product.quantity = updated_product.quantity
+    db.commit()
+    db.refresh(product)
+    return product
+
 @app.delete("/products/{product_id}")
-def delete_product(product_id: int):
-    for idx, product in enumerate(products):
-        if product.id == product_id:
-            del products[idx]
-            return {"message": "Product deleted successfully"}
-    raise HTTPException(status_code=404, detail="Product not found")
+def delete_product(product_id: int, db: Session = Depends(get_db)):
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    db.delete(product)
+    db.commit()
+    return {"message": "Product deleted successfully"}
 
-# Endpoint to add an order
-@app.post("/orders/", response_model=Order)
-def add_order(order: Order):
-    # Check if the product exists and if enough quantity is available
-    for product in products:
-        if product.id == order.product_id:
-            if product.quantity >= order.quantity:
-                product.quantity -= order.quantity
-                orders.append(order)
-                return order
-            else:
-                raise HTTPException(status_code=400, detail="Not enough quantity available")
-    raise HTTPException(status_code=404, detail="Product not found")
+@app.post("/orders/", response_model=OrderResponse)
+def add_order(order: OrderCreate, db: Session = Depends(get_db)):
+    product = db.query(Product).filter(Product.id == order.product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    if product.quantity < order.quantity:
+        raise HTTPException(status_code=400, detail="Not enough quantity available")
+    product.quantity -= order.quantity
+    db_order = Order(product_id=order.product_id, quantity=order.quantity)
+    db.add(db_order)
+    db.commit()
+    db.refresh(db_order)
+    return db_order
 
-# Endpoint to get all orders
-@app.get("/orders/", response_model=List[Order])
-def get_orders():
-    return orders
-
-# Endpoint to access the admin dashboard
-@app.get("/admin-dashboard")
-def admin_dashboard():
-    return {"message": "Welcome to the Admin Dashboard. You can manage products and orders here."}
+@app.get("/orders/", response_model=List[OrderResponse])
+def get_orders(db: Session = Depends(get_db)):
+    return db.query(Order).all()
