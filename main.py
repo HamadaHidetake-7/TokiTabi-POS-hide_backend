@@ -7,7 +7,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
 # MySQL データベースに接続する設定
-DATABASE_URL = "mysql+pymysql://root:%40S15MakeMeGreat@localhost/pos_app"
+DATABASE_URL = "mysql+pymysql://root:Great@localhost/pos_app"
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
